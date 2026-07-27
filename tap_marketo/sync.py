@@ -124,10 +124,10 @@ def update_state_with_export_info(state, stream, bookmark=None, export_id=None, 
     return state
 
 
-def get_export_end(export_start, end_days=MAX_EXPORT_DAYS):
+def get_export_end(export_start, final_export_end, end_days=MAX_EXPORT_DAYS):
     export_end = export_start.add(days=end_days)
-    if export_end >= pendulum.utcnow():
-        export_end = pendulum.utcnow()
+    if export_end >= final_export_end:
+        export_end = final_export_end
 
     return export_end.replace(microsecond=0)
 
@@ -141,7 +141,7 @@ def get_export_end(export_start, end_days=MAX_EXPORT_DAYS):
 MIN_EXPORT_DAYS = 2
 
 
-def create_export_with_quota_backoff(create_fn, export_start, max_export_days):
+def create_export_with_quota_backoff(create_fn, export_start, final_export_end, max_export_days):
     """Create a bulk export for the window starting at ``export_start``.
 
     ``create_fn`` is called with the chosen ``export_end`` and must return the
@@ -149,7 +149,7 @@ def create_export_with_quota_backoff(create_fn, export_start, max_export_days):
     MIN_EXPORT_DAYS) and retry; if the minimum window still exceeds quota the
     error is re-raised. Returns ``(export_id, export_end)``.
     """
-    export_end = get_export_end(export_start, end_days=max_export_days)
+    export_end = get_export_end(export_start, final_export_end, end_days=max_export_days)
     while True:
         try:
             export_id = create_fn(export_end)
@@ -163,7 +163,7 @@ def create_export_with_quota_backoff(create_fn, export_start, max_export_days):
             singer.log_warning(
                 "Hit Marketo API quota creating export; retrying with a "
                 "smaller %s-day window (was %s days).", new_days, window_days)
-            export_end = get_export_end(export_start, end_days=new_days)
+            export_end = get_export_end(export_start, final_export_end, end_days=new_days)
 
 
 def wait_for_export(client, state, stream, export_id):
@@ -268,6 +268,7 @@ def get_or_create_export_for_leads(client, state, stream, export_start, config):
         # Corona mode is required to query by "updatedAt", otherwise a full
         # sync is required using "createdAt".
         query_field = "updatedAt" if client.use_corona else "createdAt"
+        final_export_end = get_final_export_end(config)
         max_export_days = int(config.get('max_export_days',
                                          MAX_EXPORT_DAYS))
         fields = list(get_available_fields(stream))
@@ -282,6 +283,7 @@ def get_or_create_export_for_leads(client, state, stream, export_start, config):
         export_id, export_end = create_export_with_quota_backoff(
             create,
             export_start,
+            final_export_end,
             max_export_days
         )
         state = update_state_with_export_info(
@@ -305,6 +307,7 @@ def get_or_create_export_for_activities(client, state, stream, export_start, con
         activity_metadata = metadata.to_map(stream["metadata"])
         activity_type_id = metadata.get(activity_metadata, (), 'marketo.activity-id')
 
+        final_export_end = get_final_export_end(config)
         # Activities must be queried by `createdAt` even though
         # that is not a real field. `createdAt` proxies `activityDate`.
         # The activity type id must also be included in the query. The
@@ -323,7 +326,7 @@ def get_or_create_export_for_activities(client, state, stream, export_start, con
         # The window is automatically shrunk and retried if a single window
         # is too large to extract within the daily API quota.
         export_id, export_end = create_export_with_quota_backoff(
-            create, export_start, max_export_days)
+            create, export_start, final_export_end, max_export_days)
         state = update_state_with_export_info(
             state, stream, export_id=export_id, export_end=export_end.isoformat())
     else:
@@ -392,13 +395,17 @@ def sync_leads(client, state, stream, config):
 
     return state, record_count
 
+def get_final_export_end(config):
+    if end_date := config.get('end_date'):
+        return pendulum.parse(end_date)
+    return pendulum.utcnow()
 
 def sync_activities(client, state, stream, config):
     # http://developers.marketo.com/rest-api/bulk-extract/bulk-activity-extract/
     replication_key = determine_replication_key(stream['tap_stream_id'])
     singer.write_schema(stream["tap_stream_id"], stream["schema"], stream["key_properties"], bookmark_properties=[replication_key])
     export_start = pendulum.parse(bookmarks.get_bookmark(state, stream["tap_stream_id"], replication_key))
-    job_started = pendulum.utcnow()
+    job_started = get_final_export_end(config)
     record_count = 0
 
     activity_metadata = metadata.to_map(stream["metadata"])
@@ -407,6 +414,7 @@ def sync_activities(client, state, stream, config):
 
     while export_start < job_started:
         export_id, export_end = get_or_create_export_for_activities(client, state, stream, export_start, config)
+
         state = wait_for_export(client, state, stream, export_id)
         for row in stream_rows(client, "activities", export_id):
             time_extracted = utils.now()
@@ -417,8 +425,8 @@ def sync_activities(client, state, stream, config):
             singer.write_record(stream["tap_stream_id"], record, time_extracted=time_extracted)
             record_count += 1
 
-        state = update_state_with_export_info(state, stream, bookmark=export_start.isoformat())
         export_start = export_end
+        state = update_state_with_export_info(state, stream, bookmark=export_start.isoformat())
 
     return state, record_count
 
