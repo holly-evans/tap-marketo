@@ -19,7 +19,7 @@ STRING_TYPES = [
 ]
 
 ACTIVITY_TYPES_AUTOMATIC_INCLUSION = frozenset(["id", "name"])
-ACTIVITY_TYPES_UNSUPPORTED = frozenset(["attributes"])
+ACTIVITY_TYPES_UNSUPPORTED = frozenset([])
 LISTS_AUTOMATIC_INCLUSION = frozenset(["id", "name", "createdAt", "updatedAt"])
 PROGRAMS_AUTOMATIC_INCLUSION = frozenset(["id", "createdAt", "updatedAt"])
 CAMPAIGNS_AUTOMATIC_INCLUSION = frozenset(["id", "createdAt", "updatedAt"])
